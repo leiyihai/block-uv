@@ -2,3 +2,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 _verify.py
+*.blend1
+*.psd
+*.psb
+.claude/
