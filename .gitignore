@@ -1,9 +1,6 @@
 Thumbs.db
 __pycache__/
 *.pyc
-_verify.py
 *.blend1
 .claude/
 .work/
-_review/
-input_test/

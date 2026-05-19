@@ -209,103 +209,114 @@ print("--- Blender 任务完成 ---")
 
 
 # ============================================================
-# Step 3: PSB 图层替换 + PSD 导出
+# Step 3: 固定尺寸覆盖 PSD 图层 + 导出 PNG
 # ============================================================
 
 def step3_psd():
-    """替换 PSB render 图层，导出 PSD 为 PNG。"""
+    """用 Blender 渲染图直接替换 PSD 中的图层，使用固定尺寸，保持原位置。"""
     print("\n" + "=" * 50)
-    print("Step 3: PSB 图层替换 + PSD 导出")
+    print("Step 3: 渲染图 → PSD 图层替换 + 导出 (固定尺寸方案)")
     print("=" * 50)
 
     from psd_tools import PSDImage
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # 在 assets/ 下操作，确保智能对象能通过相对路径找到 .psb 文件
-    saved_cwd = os.getcwd()
-    os.chdir(str(ASSETS_DIR))
+    # PSD → (目标图层名, 对应渲染图, 用户指定固定宽, 用户指定固定高)
+    psd_tasks = [
+        ("bg.psd",    "render", "render_拍脸图相机.png", 724, 346),
+        ("tab.psd",   "render", "render_图标相机.png",    63,  66),
+        ("lobby.psd", "render", "render_图标相机.png",    53,  55),
+    ]
 
-    try:
-        # 3a: 替换 PSB render 图层
-        psb_tasks = [
-            ("b1.psb", "render", "render_拍脸图相机.png"),
-            ("b2.psb", "render", "render_图标相机.png"),
-        ]
-        for psb_name, layer_name, replace_png in psb_tasks:
-            psb_path = Path(psb_name)
-            if not psb_path.is_file():
-                print(f"  [跳过] {psb_name} 不存在")
-                continue
+    for psd_name, layer_name, replace_png, target_w, target_h in psd_tasks:
+        psd_path = ASSETS_DIR / psd_name
+        if not psd_path.is_file():
+            print(f"  [跳过] {psd_name} 不存在")
+            continue
 
-            print(f"  处理: {psb_name}")
-            psd = PSDImage.open(str(psb_path))
-            _replace_layer(psd, layer_name, WORK_DIR / replace_png)
-            psd.save(str(psb_path))
-            print(f"    图层 '{layer_name}' 已替换，保存回 {psb_name}")
+        render_path = WORK_DIR / replace_png
+        if not render_path.is_file():
+            print(f"    [错误] 渲染图不存在: {replace_png}")
+            continue
 
-        # 3b: PSD → PNG 导出到 output/
-        for psd_name in ["bg.psd", "tab.psd", "lobby.psd"]:
-            psd_path = Path(psd_name)
-            if not psd_path.is_file():
-                print(f"  [跳过] {psd_name} 不存在")
-                continue
+        print(f"  处理: {psd_name} (强制尺寸: {target_w}x{target_h})")
+        psd = PSDImage.open(str(psd_path))
+        _replace_layer_in_psd(psd, layer_name, render_path, target_w, target_h)
+        psd.save(str(psd_path))
 
-            print(f"  导出: {psd_name}")
-            psd = PSDImage.open(str(psd_path))
-            composite = psd.composite(force=True)
-            if composite is None:
-                print(f"    [错误] 合成失败")
-                continue
+        # 合成导出
+        composite = psd.composite(force=True)
+        if composite is None:
+            print(f"    [错误] {psd_name} 合成失败")
+            continue
 
-            out = OUTPUT_DIR / f"{psd_path.stem}.png"
-            composite.save(str(out), "PNG")
-            print(f"    已保存: output/{out.name} ({composite.width}x{composite.height})")
-    finally:
-        os.chdir(saved_cwd)
+        out = OUTPUT_DIR / f"{psd_path.stem}.png"
+        composite.save(str(out), "PNG")
+        print(f"    已导出: output/{out.name} ({composite.width}x{composite.height})")
 
 
-def _replace_layer(psd, layer_name, replacement_path):
-    """删除旧图层，以原图尺寸创建新图层替换（不缩放）。"""
+def _replace_layer_in_psd(psd, layer_name, replacement_path, target_w, target_h):
+    """精确替换 PSD 中的图层，先裁切有效像素再缩放到目标尺寸，保持原位置。"""
     from psd_tools.api.layers import PixelLayer
+    from PIL import Image
 
     old = _find_layer(psd, layer_name)
     if old is None:
-        print(f"    [警告] 未找到图层 '{layer_name}'")
-        return
+        print(f"    [提示] 未找到 '{layer_name}' 图层，跳过")
+        return False
 
-    if not hasattr(old, 'topil'):
-        print(f"    [错误] '{layer_name}' 不是像素图层")
-        return
-
-    parent = old.parent
+    # 1. 锁定原图层坐标和混合属性
+    orig_left, orig_top = old.left, old.top
     blend_mode = old.blend_mode
     opacity = old.opacity
     visible = old.visible
 
-    # 记录旧图层在父级中的位置
+    parent = old.parent
     siblings = list(parent)
     old_index = siblings.index(old)
 
-    # 加载替换图，不缩放，原图放入
+    # 2. 先裁切有效像素区域，再缩放到目标尺寸
     replacement = Image.open(str(replacement_path)).convert("RGBA")
+    replacement = _crop_effective(replacement)
+    if replacement.size != (target_w, target_h):
+        print(f"    [缩放] 裁切后 {replacement.size} → 调整为 {target_w}x{target_h}")
+        replacement = replacement.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
-    # 先删除旧图层
+    # 3. 移除旧图层
     parent.remove(old)
 
-    # 创建新图层（原图尺寸，top=0, left=0 覆盖整个画布）
+    # 4. 在原位置创建新图层
     new_layer = PixelLayer.frompil(
         replacement, parent,
-        name=layer_name, top=0, left=0,
+        name=layer_name,
+        top=orig_top, left=orig_left,
     )
     new_layer.blend_mode = blend_mode
     new_layer.opacity = opacity
     new_layer.visible = visible
 
-    # 从最顶层向下移动到旧位置
+    # 5. 还原图层深度
     steps_down = len(list(parent)) - 1 - old_index
     for _ in range(steps_down):
         new_layer.move_down()
+
+    print(f"    [成功] '{layer_name}' 已在原坐标({orig_left}, {orig_top})处安全替换。")
+    return True
+
+
+def _crop_effective(img):
+    """裁切掉完全透明的边缘区域，保留有效像素。"""
+    import numpy as np
+    arr = np.array(img)
+    alpha = arr[:, :, 3]
+    rows = np.any(alpha > 0, axis=1)
+    cols = np.any(alpha > 0, axis=0)
+    if not rows.any() or not cols.any():
+        return img
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    return img.crop((x_min, y_min, x_max + 1, y_max + 1))
 
 
 def _find_layer(layers, name):
