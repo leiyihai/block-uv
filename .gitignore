@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 _verify.py
 *.blend1
-*.psd
-*.psb
 .claude/
+.work/
+_review/
+input_test/
